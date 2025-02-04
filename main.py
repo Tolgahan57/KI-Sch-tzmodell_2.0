@@ -65,8 +65,14 @@ def main():
 
     # 5. Test: Vorhersage für ein neues Profil
     test_profile = (
-        "John Doe, IT-Spezialist und Software Engineer bei einem innovativen Tech-Unternehmen, "
-        "leidenschaftlicher Entwickler, begeistert von KI und Datenanalyse."
+        """
+    Team Lead Purchasing at AMW GmbH (11 months)
+    Director Business Partnerships at Image Professionals (1 year 2 months)
+    Head of Procurement at Hubert Burda Media (3 years 5 months)
+    Master of Business Administration - Procurement and Sourcing (2015 - 2017)
+    German, English, Spanish
+    Procurement, Stakeholder Management, Business Development, Key Account Management
+    """"
     )
     predicted_mbti = predictor.predict(test_profile)
     print(f"🎯 Vorhergesagter MBTI-Typ: {predicted_mbti}")
