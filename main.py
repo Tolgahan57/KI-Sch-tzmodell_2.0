@@ -1,81 +1,96 @@
-import os
-import tensorflow as tf
+import optuna
 from transformers import AutoTokenizer
 from modules.DataProcessor import DataProcessor
 from modules.MBTIModule import MBTIModule
-from modules.MBTIPredictor import MBTIPredictor
+import pickle
 
-# GPU-Konfiguration: GPU auswählen und Speicherwachstum aktivieren
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Wähle die erste verfügbare GPU
-os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+def objective(trial):
+    # Hyperparameter, die getuned werden, werden definiert
+    max_length = trial.suggest_categorical("max_length", [128, 256])
+    batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])
+    learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 5e-5)
+    dense_units = trial.suggest_int("dense_units", 128, 512, step=64)
+    dropout_rate = trial.suggest_uniform("dropout_rate", 0.1, 0.5)
+    max_tfidf_features = trial.suggest_categorical("max_tfidf_features", [50, 100, 150])
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print("✅ GPU erkannt und konfiguriert!")
-    except RuntimeError as e:
-        print(f"⚠️ Fehler bei der GPU-Konfiguration: {e}")
-else:
-    print("⚠️ Keine GPU erkannt. Das Training läuft auf der CPU.")
-
-# Pfad zur CSV-Datei mit den Trainingsdaten
-file_path = r"C:\Users\Tolgahan\Downloads\LinkedIn-personalities5.CSV"
-
-
-def main():
-    # 1. Tokenizer initialisieren
-    print("🔧 Initialisiere den Tokenizer...")
+    # Initialisiere Tokenizer und DataProcessor
     tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
+    processor = DataProcessor(tokenizer=tokenizer, max_length=max_length, max_tfidf_features=max_tfidf_features)
 
-    # 2. DataProcessor initialisieren und Daten laden & vorverarbeiten
-    print("📥 Lade und preprocess die Daten...")
-    processor = DataProcessor(tokenizer=tokenizer, max_length=128)
-    data = processor.load_data(file_path)
-    X, y = processor.preprocess(data)
-    print("✅ Daten erfolgreich vorverarbeitet!")
-    print("   Formen der Inputs:")
-    for key, value in X.items():
-        print(f"   {key}: {value.shape}")
-    if y is not None:
-        print(f"   Labels (y): {y.shape}")
+    # Lade Trainingsdaten
+    file_path = r"C:\Users\Tolgahan\Downloads\LinkedIn-personalities5.CSV"
+    df = processor.load_data(file_path)
+    # Fit den TF-IDF-Vektorisierer an den Trainingsdaten --> Dieser muss auf false, wenn wir mit dem Training durch sind
+    X, y = processor.preprocess(df, fit_vectorizer=True)
 
-    # 3. Modell laden oder neu erstellen und trainieren
-    model_path = "mbti_module.keras"
-    if os.path.exists(model_path):
-        print("📂 Vorhandenes Modell gefunden. Lade Modell...")
-        model = MBTIModule.load(model_path)
-    else:
-        print("🚀 Kein Modell gefunden. Erstelle und trainiere ein neues Modell...")
-        mbti_module = MBTIModule(
-            model_name="bert-base-multilingual-cased",
-            maxlen=128,
-            epochs=5,
-            batch_size=16,
-            learning_rate=2e-5
-        )
-        mbti_module.train(X, y)
-        mbti_module.save(model_path)
-        model = mbti_module.model
+    with open("tfidf_vectorizer.pkl", "wb") as f:
+        pickle.dump(processor.tfidf_vectorizer_skills, f)
 
-    # 4. MBTI_Predictor initialisieren
-    print("🔮 Initialisiere den MBTI-Predictor...")
-    predictor = MBTIPredictor(model=model, tokenizer_name="bert-base-multilingual-cased", max_length=128)
-
-    # 5. Test: Vorhersage für ein neues Profil
-    test_profile = (
-        """
-    Team Lead Purchasing at AMW GmbH (11 months)
-    Director Business Partnerships at Image Professionals (1 year 2 months)
-    Head of Procurement at Hubert Burda Media (3 years 5 months)
-    Master of Business Administration - Procurement and Sourcing (2015 - 2017)
-    German, English, Spanish
-    Procurement, Stakeholder Management, Business Development, Key Account Management
-    """"
+    # Erstelle das MBTIModule mit den getunten Hyperparametern
+    mbti_module = MBTIModule(
+        model_name="bert-base-multilingual-cased",
+        maxlen=max_length,
+        max_tfidf_features=max_tfidf_features,
+        epochs=3,  # Für das Tuning kürzer trainieren
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        dense_units=dense_units,
+        dropout_rate=dropout_rate
     )
-    predicted_mbti = predictor.predict(test_profile)
-    print(f"🎯 Vorhergesagter MBTI-Typ: {predicted_mbti}")
+
+    # Trainiere das Modell (Verwende einen Validierungssplit von z.B. 10%)
+    history = mbti_module.model.fit(
+        X, y,
+        epochs=3,
+        batch_size=batch_size,
+        validation_split=0.1,
+        verbose=0
+    )
+
+    # Zielgröße: Validierungsverlust der letzten Epoche
+    val_loss = history.history["val_loss"][-1]
+    return val_loss
+
+
+# Erstelle und starte die Optuna-Studie
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=20)
+
+print("Beste Hyperparameter:")
+print(study.best_params)
+print("Besten Validierungsverlust:")
+print(study.best_value)
+
+
+# Nach dem Tuning kann man das Modell mit den besten Parametern final trainieren:
+def main():
+    # Nutzen die besten Hyperparameter
+    best_params = study.best_params
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
+    processor = DataProcessor(tokenizer=tokenizer, max_length=best_params["max_length"],
+                              max_tfidf_features=best_params["max_tfidf_features"])
+
+    file_path = r"C:\Users\Tolgahan\Downloads\LinkedIn-personalities5.CSV"
+    df = processor.load_data(file_path)
+    X, y = processor.preprocess(df, fit_vectorizer=True)
+
+    mbti_module = MBTIModule(
+        model_name="bert-base-multilingual-cased",
+        maxlen=best_params["max_length"],
+        max_tfidf_features=best_params["max_tfidf_features"],
+        epochs=5,  # Hier kann man die KI in größeren Iterationen trainieren lassen
+        batch_size=best_params["batch_size"],
+        learning_rate=best_params["learning_rate"],
+        dense_units=best_params["dense_units"],
+        dropout_rate=best_params["dropout_rate"]
+    )
+
+    mbti_module.train(X, y)
+    mbti_module.save("mbti_module_best.keras")
+
+    # Hier könnte auch der Predictor initialisiert und getestet werden,
+    # wenn wir den tfidf-vectoriser speichern und beim Inferenzaufruf laden.
+    print("Modell trainiert und gespeichert.")
 
 
 if __name__ == "__main__":
